@@ -8,7 +8,13 @@ import {
   getCurrentTab,
   okToInjectContentScript,
 } from "./utils";
-import { CodeState } from "./models/otp";
+import { CodeState, OTPType } from "./models/otp";
+import {
+  getAutofillOrigin,
+  getAutofillPermission,
+  getAutofillSites,
+  syncAutofillContentScripts,
+} from "./models/autofill";
 
 import { getOTPAuthPerLineFromOPTAuthMigration } from "./models/migration";
 import { isChrome, isFirefox } from "./browser";
@@ -51,6 +57,10 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
     contentTab = message.data;
   } else if (message.action === "updateContextMenu") {
     updateContextMenu();
+  } else if (message.action === "autofillRequest") {
+    autofillCode(sender);
+  } else if (message.action === "updateAutofillSites") {
+    syncAutofillContentScripts();
   }
 
   // https://stackoverflow.com/a/56483156
@@ -66,6 +76,53 @@ chrome.alarms.onAlarm.addListener(() => {
 
   // https://stackoverflow.com/a/56483156
   return true;
+});
+
+// Send the code of the entry bound to the sender's origin. Everything is
+// checked here, the content script only reports that it found an OTP field
+async function autofillCode(sender: chrome.runtime.MessageSender) {
+  if (!sender.tab || sender.tab.id === undefined || sender.frameId !== 0) {
+    return;
+  }
+
+  const origin = getAutofillOrigin(sender.url);
+  if (!origin) {
+    return;
+  }
+
+  const hash = (await getAutofillSites())[origin];
+  if (
+    !hash ||
+    !(await chrome.permissions.contains(getAutofillPermission(origin)))
+  ) {
+    return;
+  }
+
+  const entry = (await EntryStorage.get()).find((entry) => entry.hash === hash);
+  // HOTP codes are not filled automatically, as that would use up the counter
+  if (!entry || entry.type === OTPType.hotp || entry.type === OTPType.hhex) {
+    return;
+  }
+
+  const { cachedPassphrase, cachedKeyId } = await chrome.storage.session.get();
+  entry.applyEncryption(new Encryption(cachedPassphrase, cachedKeyId));
+  if (entry.code === CodeState.Encrypted || entry.code === CodeState.Invalid) {
+    return;
+  }
+
+  chrome.tabs.sendMessage(
+    sender.tab.id,
+    { action: "autofillCode", code: entry.code },
+    { frameId: 0 }
+  );
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  syncAutofillContentScripts();
+});
+
+chrome.permissions.onRemoved.addListener(() => {
+  syncAutofillContentScripts();
 });
 
 async function getCapture(tab: chrome.tabs.Tab) {
@@ -434,6 +491,9 @@ async function uploadBackup(service: string) {
 
 // Show issue page after first install
 chrome.runtime.onInstalled.addListener(async (details) => {
+  // Dynamic content scripts may not survive extension updates
+  syncAutofillContentScripts();
+
   if (details.reason !== "install") {
     return;
   } else if (await ManagedStorage.get("disableInstallHelp", false)) {

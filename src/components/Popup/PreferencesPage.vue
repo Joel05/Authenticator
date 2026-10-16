@@ -30,6 +30,22 @@
       <option value="20">20%</option>
     </a-select-input>
     <a-toggle-input :label="i18n.use_autofill" v-model="useAutofill" />
+    <a-select-input
+      :label="i18n.autofill_site + ' ' + autofillSite.host"
+      :value="autofillEntry"
+      @input="setAutofillEntry"
+      style="margin-left: 10px"
+      v-if="isSupported && autofillSite"
+    >
+      <option value="">{{ i18n.autofill_site_off }}</option>
+      <option
+        v-for="entry in autofillCandidates"
+        :key="entry.hash"
+        :value="entry.hash"
+      >
+        {{ getEntryLabel(entry) }}
+      </option>
+    </a-select-input>
     <a-toggle-input
       :label="i18n.browser_sync"
       v-model="browserSync"
@@ -64,6 +80,14 @@
 import Vue from "vue";
 import { isFirefox, isSafari } from "../../browser";
 import { UserSettings } from "../../models/settings";
+import { OTPEntry, OTPType } from "../../models/otp";
+import {
+  getAutofillOrigin,
+  getAutofillPermission,
+  getAutofillSites,
+  setAutofillSite,
+} from "../../models/autofill";
+import { getCurrentTab } from "../../utils";
 
 export default Vue.extend({
   computed: {
@@ -146,13 +170,34 @@ export default Vue.extend({
         return !isFirefox && !isSafari;
       },
     },
+    autofillCandidates(): OTPEntry[] {
+      const matchedEntries: string[] =
+        this.$store.getters["accounts/matchedEntries"] || [];
+      const entries: OTPEntry[] = this.$store.state.accounts.entries.filter(
+        (entry: OTPEntry) =>
+          entry.type !== OTPType.hotp && entry.type !== OTPType.hhex
+      );
+      // Entries matching the current site first
+      return [
+        ...entries.filter((entry) => matchedEntries.includes(entry.hash)),
+        ...entries.filter((entry) => !matchedEntries.includes(entry.hash)),
+      ];
+    },
   },
-  data() {
+  data(): {
+    newStorageLocation: string;
+    autofillSite: { origin: string; host: string } | null;
+    autofillEntry: string;
+  } {
     return {
       newStorageLocation: "",
+      autofillSite: null,
+      autofillEntry: "",
     };
   },
   created() {
+    this.loadAutofillSite();
+
     UserSettings.updateItems().then(() => {
       this.newStorageLocation =
         this.$store.state.menu.storageArea ||
@@ -186,6 +231,67 @@ export default Vue.extend({
           this.$store.commit("notification/alert", this.i18n.updateFailure + r);
           this.$store.commit("currentView/changeView", "PreferencesPage");
         };
+    },
+    async loadAutofillSite() {
+      const tab = await getCurrentTab();
+      const origin = getAutofillOrigin(tab?.url);
+      if (!origin) {
+        return;
+      }
+
+      const hash = (await getAutofillSites())[origin];
+      const granted =
+        !!hash &&
+        (await chrome.permissions.contains(getAutofillPermission(origin)));
+      this.autofillEntry = granted ? hash : "";
+      this.autofillSite = { origin, host: new URL(origin).host };
+    },
+    getEntryLabel(entry: OTPEntry) {
+      const issuer = entry.issuer.split("::")[0];
+      return entry.account ? `${issuer} (${entry.account})` : issuer;
+    },
+    setAutofillEntry(hash: string) {
+      const site = this.autofillSite;
+      if (!site) {
+        return;
+      }
+
+      const permission = getAutofillPermission(site.origin);
+      const update = async (newHash: string) => {
+        this.autofillEntry = newHash;
+        await setAutofillSite(site.origin, newHash || null);
+        chrome.runtime.sendMessage({ action: "updateAutofillSites" });
+      };
+
+      if (!hash) {
+        // Keep permissions that backup providers need as well
+        const usedByBackup = (
+          chrome.runtime.getManifest().optional_host_permissions || []
+        ).some(
+          (host: string) =>
+            host !== "https://*/*" && host.startsWith(site.origin)
+        );
+        if (usedByBackup) {
+          update("");
+        } else {
+          chrome.permissions.remove(permission, () => update(""));
+        }
+        return;
+      }
+
+      // Has to be called right away, it needs the user gesture
+      chrome.permissions.request(permission, (granted) => {
+        if (granted) {
+          update(hash);
+        } else {
+          // Reset the select to the previous value
+          const previous = this.autofillEntry;
+          this.autofillEntry = hash;
+          this.$nextTick(() => {
+            this.autofillEntry = previous;
+          });
+        }
+      });
     },
     requireContextMenuPermission() {
       chrome.permissions.request(

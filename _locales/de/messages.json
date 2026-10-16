@@ -297,6 +297,12 @@
     "message": "Autofill verwenden",
     "description": "Use Autofill"
   },
+  "autofill_site": {
+    "message": "Automatisch einfügen auf"
+  },
+  "autofill_site_off": {
+    "message": "Aus"
+  },
   "use_high_contrast": {
     "message": "Hohen Kontrast benutzen",
     "description": "Use High Contrast"

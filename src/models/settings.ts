@@ -5,6 +5,8 @@ export enum StorageLocation {
 
 interface UserSettingsData {
   // local settings
+  // origin -> hash of the entry to fill in automatically
+  autofillSites?: { [origin: string]: string };
   driveEncrypted?: boolean;
   driveFolder?: string;
   driveRefreshToken?: string;
@@ -35,6 +37,8 @@ interface UserSettingsData {
 
 // Maybe we can have a better way to define this
 const LocalUserSettingsDataKeys = [
+  // host permissions are per browser, so this is never synced
+  "autofillSites",
   "driveEncrypted",
   "driveFolder",
   "driveRefreshToken",

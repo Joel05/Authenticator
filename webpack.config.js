@@ -8,6 +8,7 @@ module.exports = {
   entry: {
     argon: "./src/argon.ts",
     background: "./src/background.ts",
+    autofill: "./src/autofill.ts",
     content: "./src/content.ts",
     popup: "./src/popup.ts",
     import: "./src/import.ts",
