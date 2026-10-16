@@ -72,12 +72,61 @@ function byteArray2String(bytes: number[]) {
   return String.fromCharCode.apply(null, bytes);
 }
 
-function subBytesArray(bytes: number[], start: number, length: number) {
-  const subBytes: number[] = [];
-  for (let i = 0; i < length; i++) {
-    subBytes.push(bytes[start + i]);
+interface ProtobufField {
+  field: number;
+  // varint value for wire type 0, bytes for wire type 2
+  value: number | number[];
+}
+
+// Minimal protobuf reader. Lengths and integers are varints, so they can
+// span multiple bytes (e.g. entries >= 128 bytes with long secrets/names)
+function readVarint(bytes: number[], offset: number) {
+  let value = 0;
+  let multiplier = 1;
+  let byte: number;
+  do {
+    if (offset >= bytes.length) {
+      throw new Error("Invalid protobuf varint");
+    }
+    byte = bytes[offset++];
+    value += (byte & 0x7f) * multiplier;
+    multiplier *= 128;
+  } while (byte & 0x80);
+  return { value, offset };
+}
+
+function readProtobufFields(bytes: number[]) {
+  const fields: ProtobufField[] = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    const tag = readVarint(bytes, offset);
+    offset = tag.offset;
+    const field = Math.floor(tag.value / 8);
+    const wireType = tag.value % 8;
+    if (wireType === 0) {
+      const varint = readVarint(bytes, offset);
+      offset = varint.offset;
+      fields.push({ field, value: varint.value });
+    } else if (wireType === 2) {
+      const length = readVarint(bytes, offset);
+      offset = length.offset;
+      if (offset + length.value > bytes.length) {
+        throw new Error("Invalid protobuf length");
+      }
+      fields.push({
+        field,
+        value: bytes.slice(offset, offset + length.value),
+      });
+      offset += length.value;
+    } else if (wireType === 1) {
+      offset += 8;
+    } else if (wireType === 5) {
+      offset += 4;
+    } else {
+      throw new Error("Unsupported protobuf wire type");
+    }
   }
-  return subBytes;
+  return fields;
 }
 
 export function getOTPAuthPerLineFromOPTAuthMigration(migrationUri: string) {
@@ -89,41 +138,80 @@ export function getOTPAuthPerLineFromOPTAuthMigration(migrationUri: string) {
   const wordArrayData = CryptoJS.enc.Base64.parse(base64Data);
   const byteData = wordArrayToByteArray(wordArrayData);
   const lines: string[] = [];
-  let offset = 0;
-  while (offset < byteData.length) {
-    if (byteData[offset] !== 10) {
-      break;
+
+  let payload: ProtobufField[];
+  try {
+    payload = readProtobufFields(byteData);
+  } catch (error) {
+    console.error(error);
+    return [];
+  }
+
+  // MigrationPayload.otp_parameters = 1
+  for (const otpParameters of payload) {
+    if (
+      otpParameters.field !== 1 ||
+      typeof otpParameters.value === "number"
+    ) {
+      continue;
     }
-    const lineLength = byteData[offset + 1];
-    const secretStart = offset + 4;
-    const secretLength = byteData[offset + 3];
-    const secretBytes = subBytesArray(byteData, secretStart, secretLength);
-    const secret = byteArray2Base32(secretBytes);
-    const accountStart = secretStart + secretLength + 2;
-    const accountLength = byteData[secretStart + secretLength + 1];
-    const accountBytes = subBytesArray(byteData, accountStart, accountLength);
-    const account = byteArray2String(accountBytes);
-    const isserStart = accountStart + accountLength + 2;
-    const isserLength = byteData[accountStart + accountLength + 1];
-    const issuerBytes = subBytesArray(byteData, isserStart, isserLength);
-    const issuer = byteArray2String(issuerBytes);
-    const algorithm = ["SHA1", "SHA1", "SHA256", "SHA512", "MD5"][
-      byteData[isserStart + isserLength + 1]
-    ];
-    const digits = [6, 6, 8][byteData[isserStart + isserLength + 3]];
-    const type = ["totp", "hotp", "totp"][
-      byteData[isserStart + isserLength + 5]
-    ];
+
+    let parameters: ProtobufField[];
+    try {
+      parameters = readProtobufFields(otpParameters.value);
+    } catch (error) {
+      console.error(error);
+      continue;
+    }
+
+    let secret = "";
+    let account = "";
+    let issuer = "";
+    let algorithm = "SHA1";
+    let digits = 6;
+    let type = "totp";
+    let counter = 1;
+    for (const { field, value } of parameters) {
+      if (typeof value === "number") {
+        switch (field) {
+          case 4:
+            algorithm =
+              ["SHA1", "SHA1", "SHA256", "SHA512", "MD5"][value] || "SHA1";
+            break;
+          case 5:
+            digits = [6, 6, 8][value] || 6;
+            break;
+          case 6:
+            type = ["totp", "hotp", "totp"][value] || "totp";
+            break;
+          case 7:
+            counter = value;
+            break;
+        }
+      } else {
+        switch (field) {
+          case 1:
+            secret = byteArray2Base32(value);
+            break;
+          case 2:
+            account = byteArray2String(value);
+            break;
+          case 3:
+            issuer = byteArray2String(value);
+            break;
+        }
+      }
+    }
+
+    if (!secret) {
+      continue;
+    }
+
     let line = `otpauth://${type}/${account}?secret=${secret}&issuer=${issuer}&algorithm=${algorithm}&digits=${digits}`;
     if (type === "hotp") {
-      let counter = 1;
-      if (isserStart + isserLength + 7 <= lineLength) {
-        counter = byteData[isserStart + isserLength + 7];
-      }
       line += `&counter=${counter}`;
     }
     lines.push(line);
-    offset += lineLength + 2;
   }
   return lines;
 }
