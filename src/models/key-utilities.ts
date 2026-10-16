@@ -79,6 +79,13 @@ export class KeyUtilities {
         throw new Error("Invalid Base32 string");
     }
 
+    // Drop leftover bits that don't form a complete byte (RFC 4648),
+    // otherwise unpadded secrets with a length that isn't a multiple of 8
+    // would get an extra byte appended later on
+    if (hex.length % 2 === 1) {
+      hex = hex.substr(0, hex.length - 1);
+    }
+
     return hex;
   }
 
