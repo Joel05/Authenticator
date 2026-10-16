@@ -149,10 +149,7 @@ export function getOTPAuthPerLineFromOPTAuthMigration(migrationUri: string) {
 
   // MigrationPayload.otp_parameters = 1
   for (const otpParameters of payload) {
-    if (
-      otpParameters.field !== 1 ||
-      typeof otpParameters.value === "number"
-    ) {
+    if (otpParameters.field !== 1 || typeof otpParameters.value === "number") {
       continue;
     }
 
